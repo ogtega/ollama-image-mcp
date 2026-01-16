@@ -1,12 +1,13 @@
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, List, Literal, NamedTuple, Optional
+from typing import AsyncIterator, Literal, NamedTuple, Optional
 
 import httpx
 from mcp import ServerSession
 from mcp.server.fastmcp import Context, FastMCP
-from pydantic import BaseModel, Field, SkipValidation, ValidationError
+from mcp.types import ImageContent, TextContent
+from pydantic import BaseModel, SkipValidation, ValidationError
 
 # --- Strict Data Models ---
 
@@ -22,7 +23,7 @@ class ImageData(BaseModel):
 
 class DoneEvent(BaseModel):
     created: int
-    data: List[ImageData]
+    data: list[ImageData]
 
 
 # --- Server Setup ---
@@ -49,13 +50,55 @@ async def lifespan(_: FastMCP) -> AsyncIterator[AppContext]:
 mcp = FastMCP("Ollama Image Generator", lifespan=lifespan)
 
 
+async def process_sse_event(
+    ctx: Context[ServerSession, AppContext], event_type: Optional[str], data_text: str
+) -> Optional[str]:
+    """
+    Parses JSON strictly against Pydantic models.
+    """
+    if data_text.strip() == "[DONE]":
+        return None
+
+    try:
+        raw = json.loads(data_text)
+    except json.JSONDecodeError:
+        logging.warning(f"Skipping invalid JSON: {data_text[:50]}...")
+        return None
+
+    # 1. Check for Progress
+    # We check structure presence because 'event' field is optional in some SSE implementations
+    if event_type == "progress" or ("step" in raw and "total" in raw):
+        try:
+            event = ProgressEvent.model_validate(raw)
+            await ctx.info(f"Generating... {event.step}/{event.total}")
+            return None
+        except ValidationError as e:
+            logging.error(f"Validation failed for ProgressEvent: {e}")
+            return None
+
+    # 2. Check for Done/Success
+    if event_type == "done" or "data" in raw:
+        try:
+            event = DoneEvent.model_validate(raw)
+            if event.data:
+                # Strip newlines/CR to ensure a clean base64 string
+                return next(iter(event.data)).b64_json
+        except ValidationError as e:
+            logging.error(f"Validation failed for DoneEvent: {e}")
+            return None
+
+    # If we reach here, it's an unknown event type.
+    # In strict mode, we ignore it rather than guessing.
+    return None
+
+
 @mcp.tool()
 async def generate_image(
     ctx: Context[ServerSession, AppContext],
     prompt: str,
     size: str = "1024x1024",
     model: Literal["x/z-image-turbo"] = "x/z-image-turbo",
-) -> dict[str, Any] | str:
+) -> list[ImageContent | TextContent] | str:
     """Generates an image using the local Ollama API with strict Pydantic validation."""
     url = "http://localhost:11434/v1/images/generations"
 
@@ -75,61 +118,18 @@ async def generate_image(
     current_event_type: Optional[str] = None
     current_data_lines: list[str] = []
 
-    async def process_sse_event(
-        event_type: Optional[str], data_text: str
-    ) -> Optional[str]:
-        """
-        Parses JSON strictly against Pydantic models.
-        """
-        if data_text.strip() == "[DONE]":
-            return None
-
-        try:
-            raw = json.loads(data_text)
-        except json.JSONDecodeError:
-            logging.warning(f"Skipping invalid JSON: {data_text[:50]}...")
-            return None
-
-        # 1. Check for Progress
-        # We check structure presence because 'event' field is optional in some SSE implementations
-        if event_type == "progress" or ("step" in raw and "total" in raw):
-            try:
-                event = ProgressEvent.model_validate(raw)
-                await ctx.info(f"Generating... {event.step}/{event.total}")
-                return None
-            except ValidationError as e:
-                logging.error(f"Validation failed for ProgressEvent: {e}")
-                return None
-
-        # 2. Check for Done/Success
-        if event_type == "done" or "data" in raw:
-            try:
-                event = DoneEvent.model_validate(raw)
-                if event.data:
-                    # Strip newlines/CR to ensure a clean base64 string
-                    return next(iter(event.data))
-            except ValidationError as e:
-                logging.error(f"Validation failed for DoneEvent: {e}")
-                return None
-
-        # If we reach here, it's an unknown event type.
-        # In strict mode, we ignore it rather than guessing.
-        return None
-
     try:
         async with http_client.stream("POST", url, json=payload) as response:
             response.raise_for_status()
 
             async for raw_line in response.aiter_lines():
-                if raw_line is None:
-                    continue
                 line = raw_line.rstrip("\r\n")
 
-                if line == "":
+                if line == "":  # End of an SSE event
                     if current_data_lines:
                         # Process buffered event
                         img = await process_sse_event(
-                            current_event_type, "\n".join(current_data_lines)
+                            ctx, current_event_type, "\n".join(current_data_lines)
                         )
                         if img:
                             final_image = img
@@ -146,7 +146,7 @@ async def generate_image(
                     # Handle non-SSE JSON lines if server sends them (Strict JSON check)
                     try:
                         json.loads(line)
-                        img = await process_sse_event(None, line)
+                        img = await process_sse_event(ctx, None, line)
                         if img:
                             final_image = img
                             break
@@ -159,12 +159,10 @@ async def generate_image(
     if not final_image:
         return "Stream ended without returning valid image data."
 
-    return {
-        "content": [
-            {"type": "text", "text": f"Generated: {prompt}"},
-            {"type": "image", "data": final_image, "mimeType": "image/png"},
-        ]
-    }
+    return [
+        TextContent(type="text", text=f"Generated: {prompt}"),
+        ImageContent(type="image", data=final_image, mimeType="image/png"),
+    ]
 
 
 def main():
