@@ -1,10 +1,12 @@
 import json
 import logging
-from typing import Any, List, Optional
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, List, Literal, NamedTuple, Optional
 
 import httpx
+from mcp import ServerSession
 from mcp.server.fastmcp import Context, FastMCP
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, SkipValidation, ValidationError
 
 # --- Strict Data Models ---
 
@@ -15,7 +17,7 @@ class ProgressEvent(BaseModel):
 
 
 class ImageData(BaseModel):
-    b64_json: str
+    b64_json: SkipValidation[str]
 
 
 class DoneEvent(BaseModel):
@@ -25,16 +27,36 @@ class DoneEvent(BaseModel):
 
 # --- Server Setup ---
 
-mcp = FastMCP("Ollama Image Generator")
+
+class AppContext(NamedTuple):
+    """Application context with typed dependencies."""
+
+    http_client: httpx.AsyncClient
+
+
+@asynccontextmanager
+async def lifespan(_: FastMCP) -> AsyncIterator[AppContext]:
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=60.0, read=None, write=None, pool=None)
+    )
+
+    try:
+        yield AppContext(http_client)
+    finally:
+        await http_client.aclose()
+
+
+mcp = FastMCP("Ollama Image Generator", lifespan=lifespan)
 
 
 @mcp.tool()
 async def generate_image(
-    ctx: Context, prompt: str, size: str = "1024x1024", model: str = "x/z-image-turbo"
+    ctx: Context[ServerSession, AppContext],
+    prompt: str,
+    size: str = "1024x1024",
+    model: Literal["x/z-image-turbo"] = "x/z-image-turbo",
 ) -> dict[str, Any] | str:
-    """
-    Generates an image using the local Ollama API with strict Pydantic validation.
-    """
+    """Generates an image using the local Ollama API with strict Pydantic validation."""
     url = "http://localhost:11434/v1/images/generations"
 
     payload = {
@@ -45,10 +67,9 @@ async def generate_image(
         "stream": True,
     }
 
-    final_image: Optional[str] = None
+    (http_client,) = ctx.request_context.lifespan_context
 
-    # Connect timeout only; infinite read timeout for generation
-    timeout = httpx.Timeout(connect=60.0, read=None)
+    final_image: Optional[str] = None
 
     # SSE State
     current_event_type: Optional[str] = None
@@ -85,7 +106,8 @@ async def generate_image(
             try:
                 event = DoneEvent.model_validate(raw)
                 if event.data:
-                    return event.data[0].b64_json
+                    # Strip newlines/CR to ensure a clean base64 string
+                    return next(iter(event.data))
             except ValidationError as e:
                 logging.error(f"Validation failed for DoneEvent: {e}")
                 return None
@@ -95,42 +117,41 @@ async def generate_image(
         return None
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("POST", url, json=payload) as response:
-                response.raise_for_status()
+        async with http_client.stream("POST", url, json=payload) as response:
+            response.raise_for_status()
 
-                async for raw_line in response.aiter_lines():
-                    if raw_line is None:
-                        continue
-                    line = raw_line.rstrip("\r\n")
+            async for raw_line in response.aiter_lines():
+                if raw_line is None:
+                    continue
+                line = raw_line.rstrip("\r\n")
 
-                    if line == "":
-                        if current_data_lines:
-                            # Process buffered event
-                            img = await process_sse_event(
-                                current_event_type, "\n".join(current_data_lines)
-                            )
-                            if img:
-                                final_image = img
-                                break
-                            current_event_type = None
-                            current_data_lines = []
-                        continue
+                if line == "":
+                    if current_data_lines:
+                        # Process buffered event
+                        img = await process_sse_event(
+                            current_event_type, "\n".join(current_data_lines)
+                        )
+                        if img:
+                            final_image = img
+                            break
+                        current_event_type = None
+                        current_data_lines = []
+                    continue
 
-                    if line.startswith("event:"):
-                        current_event_type = line.split(":", 1)[1].strip()
-                    elif line.startswith("data:"):
-                        current_data_lines.append(line.split(":", 1)[1].lstrip())
-                    else:
-                        # Handle non-SSE JSON lines if server sends them (Strict JSON check)
-                        try:
-                            json.loads(line)
-                            img = await process_sse_event(None, line)
-                            if img:
-                                final_image = img
-                                break
-                        except json.JSONDecodeError:
-                            pass
+                if line.startswith("event:"):
+                    current_event_type = line.split(":", 1)[1].strip()
+                elif line.startswith("data:"):
+                    current_data_lines.append(line.split(":", 1)[1].lstrip())
+                else:
+                    # Handle non-SSE JSON lines if server sends them (Strict JSON check)
+                    try:
+                        json.loads(line)
+                        img = await process_sse_event(None, line)
+                        if img:
+                            final_image = img
+                            break
+                    except json.JSONDecodeError:
+                        pass
 
     except Exception as e:
         return f"Error: {str(e)}"
