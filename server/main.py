@@ -6,6 +6,7 @@ from typing import AsyncIterator, Literal, NamedTuple, Optional
 import httpx
 from mcp import ServerSession
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ImageContent, TextContent
 from pydantic import BaseModel, SkipValidation, ValidationError
 
@@ -99,7 +100,12 @@ async def generate_image(
     size: str = "1024x1024",
     model: Literal["x/z-image-turbo"] = "x/z-image-turbo",
 ) -> list[ImageContent | TextContent] | str:
-    """Generates an image using the local Ollama API with strict Pydantic validation."""
+    """
+    Generates an image from a prompt.
+    The tool returns a long string of data that the user interface will display as an image.
+    The assistant should ignore content with an image type in its response and simply tell the user
+    that their image is ready without trying to analyze or describe the raw image data in the tool response.
+    """
     url = "http://localhost:11434/v1/images/generations"
 
     payload = {
@@ -154,10 +160,10 @@ async def generate_image(
                         pass
 
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise ToolError from e
 
     if not final_image:
-        return "Stream ended without returning valid image data."
+        raise ToolError("Stream ended without returning valid image data.")
 
     return [
         TextContent(type="text", text=f"Generated: {prompt}"),
