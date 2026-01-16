@@ -19,24 +19,9 @@ This server exposes a tool that allows connected LLMs to generate images from te
 - **Image Model**: An image generation model available in Ollama. The default is `x/z-image-turbo`.
   - Ensure you have pulled the model: `ollama pull x/z-image-turbo`
 
-## Installation
+## Usage
 
-This project uses `uv` for dependency management.
-
-1. **Clone the repository:**
-   ```bash
-   git clone <your-repo-url>
-   cd ollama-image-mcp
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   uv sync
-   ```
-
-## Configuration
-
-To use this server with an MCP client (like Claude Desktop), configure it to run the server script.
+To use this server with an MCP client (like Claude Desktop), you can run it directly using `uvx`.
 
 ### Claude Desktop Configuration
 
@@ -57,9 +42,9 @@ Edit your `claude_desktop_config.json` (typically located at `~/Library/Applicat
 
 *Note: This will automatically download and run the server using `uvx`.*
 
-## Tools Available
+### Tools Available
 
-### `generate_image`
+#### `generate_image`
 
 Generates an image using the specified prompt.
 
@@ -68,6 +53,23 @@ Generates an image using the specified prompt.
 - **model** (string, optional): The Ollama model tag to use (default: "x/z-image-turbo").
 
 ## Development
+
+### Setup
+
+This project uses `uv` for dependency management.
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/ogtega/ollama-image-mcp.git
+   cd ollama-image-mcp
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   uv sync
+   ```
+
+### Common Tasks
 
 The project includes a `Makefile` for common development tasks.
 
