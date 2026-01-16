@@ -10,9 +10,6 @@ dependencies = [
     "pydantic>=2.12.5",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src/server"]
-
 [dependency-groups]
 dev = [
     "black>=25.12.0",
