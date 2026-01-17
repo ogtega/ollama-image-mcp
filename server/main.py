@@ -7,10 +7,10 @@ import httpx
 from mcp import ServerSession
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ImageContent, TextContent
+from mcp.types import ImageContent
 from pydantic import BaseModel, SkipValidation, ValidationError
 
-# --- Strict Data Models ---
+# --- Data Models ---
 
 
 class ProgressEvent(BaseModel):
@@ -99,13 +99,18 @@ async def generate_image(
     prompt: str,
     size: str = "1024x1024",
     model: Literal["x/z-image-turbo"] = "x/z-image-turbo",
-) -> list[ImageContent | TextContent] | str:
+) -> ImageContent:
     """
-    Generates an image from a prompt.
-    The tool returns a long string of data that the user interface will display as an image.
-    The assistant should ignore content with an image type in its response and simply tell the user
-    that their image is ready without trying to analyze or describe the raw image data in the tool response.
+    Generates an image based on the provided prompt using the Ollama image generation API.
+    Streams progress updates and returns the final image in base64 format.
+    Args:
+        prompt (str): The text prompt to generate the image from.
+        size (str, optional): The desired image size. Defaults to "1024x1024".
+        model (Literal["x/z-image-turbo"], optional): The image generation model to use. Defaults to "x/z-image-turbo".
+    Returns:
+        ImageContent: The generated image in base64 format.
     """
+
     url = "http://localhost:11434/v1/images/generations"
 
     payload = {
@@ -165,10 +170,7 @@ async def generate_image(
     if not final_image:
         raise ToolError("Stream ended without returning valid image data.")
 
-    return [
-        TextContent(type="text", text=f"Generated: {prompt}"),
-        ImageContent(type="image", data=final_image, mimeType="image/png"),
-    ]
+    return ImageContent(type="image", data=final_image, mimeType="image/png")
 
 
 def main():
