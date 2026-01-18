@@ -72,6 +72,7 @@ async def process_sse_event(
         try:
             event = ProgressEvent.model_validate(raw)
             await ctx.info(f"Generating... {event.step}/{event.total}")
+            await ctx.report_progress(event.step, total=event.total)
             return None
         except ValidationError as e:
             logging.error(f"Validation failed for ProgressEvent: {e}")
@@ -128,6 +129,8 @@ async def generate_image(
     # SSE State
     current_event_type: Optional[str] = None
     current_data_lines: list[str] = []
+
+    await ctx.report_progress(0)
 
     try:
         async with http_client.stream("POST", url, json=payload) as response:
